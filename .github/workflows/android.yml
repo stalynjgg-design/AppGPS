@@ -22,9 +22,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Instalar dependencias y Capacitor
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Inicializar Capacitor y plataforma Android
         run: |
-          npm install
+          npx cap init AppGPS com.gps.app --web-dir www --yes || true
           npx cap add android
 
       - name: Construir proyecto Android
