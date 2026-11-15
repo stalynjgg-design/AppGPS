@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>GPS - Rastreo en Segundo Plano</title>
+    
+    <!-- CSS de Leaflet -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; }
+        body, html { height: 100%; width: 100%; display: flex; flex-direction: column; }
+
+        .panel-control {
+            background-color: #0f172a;
+            color: white;
+            padding: 12px;
+            z-index: 1000;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+        }
+
+        .seccion {
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #334155;
+        }
+
+        .seccion:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+        h3 { font-size: 14px; margin-bottom: 6px; color: #94a3b8; }
+
+        .fila { display: flex; gap: 6px; }
+        input {
+            flex: 1; padding: 8px; border: none; border-radius: 6px;
+            font-size: 14px; outline: none;
+        }
+
+        button {
+            background-color: #3ecf8e; color: #0f172a; border: none;
+            padding: 8px 12px; border-radius: 6px; font-weight: bold; cursor: pointer;
+        }
+
+        .btn-azul { background-color: #3b82f6; color: white; }
+        .btn-rojo { background-color: #ef4444; color: white; }
+        #mapa { flex: 1; width: 100%; z-index: 1; }
+
+        .pin-amigo {
+            background-color: #ef4444; color: white; border: 2px solid white;
+            border-radius: 50%; text-align: center; font-weight: bold;
+            line-height: 26px; box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="panel-control">
+        <div class="seccion">
+            <h3>1. Tu perfil (Rastreo activo en segundo plano)</h3>
+            <div class="fila">
+                <input type="text" id="miNombre" placeholder="Tu nombre">
+                <input type="tel" id="miTelefono" placeholder="Tu teléfono">
+                <button id="btnConectar" onclick="iniciarTransmisionNativa()">Conectar</button>
+            </div>
+        </div>
+
+        <div class="seccion">
+            <h3>2. Buscar a un amigo conectado</h3>
+            <div class="fila">
+                <input type="tel" id="buscarTelefono" placeholder="Teléfono de tu amigo">
+                <button class="btn-azul" onclick="seguirAmigo()">Rastrear</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="mapa"></div>
+
+    <!-- Librería de Mapas -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Librería oficial de Supabase -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+    <script>
+        // ⚠️ PEGA AQUÍ TUS CREDENCIALES DE SUPABASE ⚠️
+        const SUPABASE_URL = 'https://rquddcskdnbbwpygtlsl.supabase.co';
+        const SUPABASE_KEY = 'sb_publishable_-JXQQPCFNjw0eFsLCrorrw_U8DildnG';
+
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        // Inicializar Mapa
+        const mapa = L.map('mapa').setView([11.6914, -70.1995], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(mapa);
+
+        let miMarcador = null;
+        const marcadoresAmigos = {};
+        let watcherId = null;
+
+        function limpiarNumero(num) {
+            return num.replace(/\D/g, '');
+        }
+
+        // Función auxiliar para subir coordenadas a Supabase
+        async function enviarCoordenadas(telefono, nombre, lat, lng) {
+            const hora = new Date().toLocaleTimeString();
+
+            const { error } = await supabaseClient
+                .from('usuarios')
+                .upsert({
+                    telefono: telefono,
+                    nombre: nombre,
+                    lat: lat,
+                    lng: lng,
+                    ultima_vez: hora
+                });
+
+            if (error) {
+                console.error("Error subiendo GPS:", error);
+                return;
+            }
+
+            if (!miMarcador) {
+                miMarcador = L.marker([lat, lng]).addTo(mapa)
+                    .bindPopup(`<b>Tú (${nombre})</b>`).openPopup();
+                mapa.setView([lat, lng], 15);
+            } else {
+                miMarcador.setLatLng([lat, lng]);
+            }
+        }
+
+        // 1. TRANSMISIÓN NATIVA EN SEGUNDO PLANO (CAPACITOR)
+        async function iniciarTransmisionNativa() {
+            const nombre = document.getElementById('miNombre').value.trim();
+            const telefono = limpiarNumero(document.getElementById('miTelefono').value);
+
+            if (!nombre || !telefono) {
+                alert("Escribe tu nombre y tu número de teléfono.");
+                return;
+            }
+
+            // Verificar si estamos corriendo dentro de la app nativa instalada (Capacitor)
+            if (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundGeolocation) {
+                const BackgroundGeolocation = window.Capacitor.Plugins.BackgroundGeolocation;
+
+                try {
+                    watcherId = await BackgroundGeolocation.addWatcher(
+                        {
+                            // Esta notificación es obligatoria en Android para que no cierre la app
+                            backgroundMessage: "Tu ubicación se está compartiendo en tiempo real.",
+                            backgroundTitle: "GPS Activo",
+                            requestPermissions: true,
+                            stale: false,
+                            distanceFilter: 10 // Actualiza cada vez que te muevas 10 metros
+                        },
+                        function callback(location, error) {
+                            if (error) {
+                                if (error.code === "NOT_AUTHORIZED") {
+                                    alert("Debes permitir la ubicación 'Todo el tiempo' en los ajustes de la app.");
+                                }
+                                return;
+                            }
+                            // Enviar coordenadas reales incluso con la pantalla apagada
+                            enviarCoordenadas(telefono, nombre, location.latitude, location.longitude);
+                        }
+                    );
+                    alert("¡Rastreo en segundo plano activado! Ya puedes salir de la app.");
+                } catch (e) {
+                    alert("Error iniciando servicio nativo: " + e.message);
+                }
+
+            } else {
+                // Respaldo: Si lo abres en Acode o en un navegador web normal
+                alert("Modo web detectado (para segundo plano debes compilar el APK). Usando GPS normal...");
+                navigator.geolocation.watchPosition((pos) => {
+                    enviarCoordenadas(telefono, nombre, pos.coords.latitude, pos.coords.longitude);
+                }, null, { enableHighAccuracy: true });
+            }
+        }
+
+        // 2. BUSCAR Y ESCUCHAR EN TIEMPO REAL A UN AMIGO
+        async function seguirAmigo() {
+            const telAmigo = limpiarNumero(document.getElementById('buscarTelefono').value);
+
+            if (!telAmigo) {
+                alert("Ingresa el número de teléfono de tu amigo.");
+                return;
+            }
+
+            const { data, error } = await supabaseClient
+                .from('usuarios')
+                .select('*')
+                .eq('telefono', telAmigo)
+                .single();
+
+            if (error || !data) {
+                alert("Ese número aún no está conectado en la app.");
+                return;
+            }
+
+            actualizarPinAmigo(data);
+            mapa.setView([data.lat, data.lng], 15);
+
+            supabaseClient
+                .channel('seguimiento-' + telAmigo)
+                .on(
+                    'postgres_changes',
+                    {
+                        event: '*',
+                        schema: 'public',
+                        table: 'usuarios',
+                        filter: `telefono=eq.${telAmigo}`
+                    },
+                    (payload) => {
+                        if (payload.new) {
+                            actualizarPinAmigo(payload.new);
+                        }
+                    }
+                )
+                .subscribe();
+        }
+
+        function actualizarPinAmigo(datos) {
+            const { telefono, nombre, lat, lng, ultima_vez } = datos;
+
+            if (!marcadoresAmigos[telefono]) {
+                const icono = L.divIcon({
+                    className: 'pin-amigo',
+                    html: nombre.charAt(0).toUpperCase(),
+                    iconSize: [30, 30]
+                });
+
+                marcadoresAmigos[telefono] = L.marker([lat, lng], { icon: icono })
+                    .addTo(mapa)
+                    .bindPopup(`<b>👤 ${nombre}</b><br>Actualizado: ${ultima_vez}`)
+                    .openPopup();
+            } else {
+                marcadoresAmigos[telefono].setLatLng([lat, lng]);
+                marcadoresAmigos[telefono].setPopupContent(`<b>👤 ${nombre}</b><br>Actualizado: ${ultima_vez}`);
+            }
+        }
+    </script>
+</body>
+      </html>
+  
