@@ -1,0 +1,6 @@
+{
+  "appId": "com.tuapp.gps",
+  "appName": "GPS",
+  "webDir": "www",
+  "bundledWebRuntime": false
+}
